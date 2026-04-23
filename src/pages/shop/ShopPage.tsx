@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { format, startOfWeek } from 'date-fns';
-import { Plus, RefreshCw, CheckCircle2, Pencil } from 'lucide-react';
+import { format, startOfWeek, addDays } from 'date-fns';
+import { Plus, RefreshCw, CheckCircle2, Pencil, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -13,7 +13,7 @@ import { Label } from '@/components/ui/label';
 import { supabase } from '@/lib/supabase';
 import { useFamilyStore } from '@/store/familyStore';
 import { toast } from '@/hooks/use-toast';
-import type { ShoppingItem, StoreType } from '@/types/database';
+import type { ShoppingItem, StoreType, TripType } from '@/types/database';
 
 const STORES: { id: StoreType; label: string; emoji: string; color: string }[] = [
   { id: 'target', label: 'Target', emoji: '🎯', color: 'bg-red-50 dark:bg-red-950/20' },
@@ -103,6 +103,69 @@ export default function ShopPage() {
     },
   });
 
+  const generateFromPlan = useMutation({
+    mutationFn: async () => {
+      const weekEnd = format(addDays(startOfWeek(new Date(), { weekStartsOn: 1 }), 6), 'yyyy-MM-dd');
+
+      // Get this week's meal plans with recipe_ids
+      const { data: plans } = await supabase
+        .from('meal_plan')
+        .select('recipe_id')
+        .eq('family_id', familyId!)
+        .gte('date', weekOf)
+        .lte('date', weekEnd)
+        .not('recipe_id', 'is', null);
+
+      const recipeIds = [...new Set((plans ?? []).map((p: { recipe_id: string }) => p.recipe_id))];
+      if (recipeIds.length === 0) throw new Error('No recipes planned this week. Add meals to your plan first.');
+
+      // Get all ingredients for those recipes
+      const { data: ingredients, error: ingErr } = await supabase
+        .from('ingredients')
+        .select('*')
+        .in('recipe_id', recipeIds);
+      if (ingErr) throw ingErr;
+      if (!ingredients || ingredients.length === 0)
+        throw new Error('Your planned recipes have no ingredients yet. Add ingredients to your recipes first.');
+
+      // Aggregate by name + unit (combine duplicates, sum qty)
+      const agg = new Map<string, { item_name: string; emoji: string; qty: number; unit: string; store: StoreType; trip_type: TripType; linked_recipe_ids: string[] }>();
+      for (const ing of ingredients) {
+        const key = `${ing.name.toLowerCase().trim()}|${ing.unit.toLowerCase().trim()}`;
+        if (agg.has(key)) {
+          const ex = agg.get(key)!;
+          ex.qty += ing.quantity;
+          if (!ex.linked_recipe_ids.includes(ing.recipe_id)) ex.linked_recipe_ids.push(ing.recipe_id);
+        } else {
+          agg.set(key, {
+            item_name: ing.name, emoji: ing.emoji || '🛒',
+            qty: ing.quantity, unit: ing.unit,
+            store: ing.store_preference as StoreType,
+            trip_type: ing.trip_type as TripType,
+            linked_recipe_ids: [ing.recipe_id],
+          });
+        }
+      }
+
+      // Skip items already in the list
+      const existingNames = new Set(items.map((i) => i.item_name.toLowerCase().trim()));
+      const toInsert = [...agg.values()]
+        .filter((item) => !existingNames.has(item.item_name.toLowerCase().trim()))
+        .map((item) => ({ family_id: familyId!, week_of: weekOf, ...item, status: 'needed' as const }));
+
+      if (toInsert.length === 0) return 0;
+
+      const { error } = await supabase.from('shopping_list').insert(toInsert);
+      if (error) throw error;
+      return toInsert.length;
+    },
+    onSuccess: (count) => {
+      queryClient.invalidateQueries({ queryKey: ['shopping_list', familyId, weekOf] });
+      toast({ title: count === 0 ? 'All ingredients already in your list ✓' : `Added ${count} ingredient${count === 1 ? '' : 's'} to your list! 🛒` });
+    },
+    onError: (e) => toast({ title: e instanceof Error ? e.message : 'Something went wrong', variant: 'destructive' }),
+  });
+
   function openAdd() {
     setEditItem(null);
     setDraft(EMPTY_DRAFT);
@@ -130,9 +193,16 @@ export default function ShopPage() {
           <h1 className="text-2xl font-bold">Shopping List</h1>
           <p className="text-sm text-muted-foreground">{neededCount} to buy · {boughtCount} done</p>
         </div>
-        <Button size="sm" onClick={openAdd}>
-          <Plus className="mr-1 h-4 w-4" /> Add Item
-        </Button>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={() => generateFromPlan.mutate()} disabled={generateFromPlan.isPending}>
+            {generateFromPlan.isPending
+              ? <RefreshCw className="h-4 w-4 animate-spin" />
+              : <><Sparkles className="mr-1 h-4 w-4" />From plan</>}
+          </Button>
+          <Button size="sm" onClick={openAdd}>
+            <Plus className="mr-1 h-4 w-4" /> Add Item
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -140,7 +210,7 @@ export default function ShopPage() {
           {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-32 w-full rounded-2xl" />)}
         </div>
       ) : items.length === 0 ? (
-        <EmptyState />
+        <EmptyState onGenerate={() => generateFromPlan.mutate()} generating={generateFromPlan.isPending} />
       ) : (
         <>
           {itemsByStore.map(({ id, label, emoji, color, items: storeItems }) => {
@@ -282,12 +352,19 @@ function ShoppingItemRow({
   );
 }
 
-function EmptyState() {
+function EmptyState({ onGenerate, generating }: { onGenerate: () => void; generating: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center px-4">
       <span className="text-6xl mb-4">🛒</span>
       <h3 className="font-semibold text-lg">Your list is empty</h3>
-      <p className="text-muted-foreground text-sm mt-1 mb-4">Generate from your meal plan, or add items manually.</p>
+      <p className="text-muted-foreground text-sm mt-1 mb-6">
+        Pull in every ingredient from this week's planned meals automatically.
+      </p>
+      <Button className="w-full max-w-xs" onClick={onGenerate} disabled={generating}>
+        {generating
+          ? <><RefreshCw className="mr-2 h-4 w-4 animate-spin" />Generating...</>
+          : <><Sparkles className="mr-2 h-4 w-4" />Generate from Meal Plan</>}
+      </Button>
     </div>
   );
 }

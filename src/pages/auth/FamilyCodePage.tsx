@@ -3,6 +3,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Loader2, Users, Plus, ArrowRight } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -31,6 +32,7 @@ export default function FamilyCodePage() {
   const [createdCode, setCreatedCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const setFamily = useFamilyStore((s) => s.setFamily);
+  const navigate = useNavigate();
 
   const {
     register,
@@ -84,6 +86,7 @@ export default function FamilyCodePage() {
 
       setFamily(data.id, data.code);
       toast({ title: '🎉 Welcome to the family!', variant: 'default' });
+      navigate('/', { replace: true });
     } catch (err) {
       toast({ title: 'Error', description: String(err), variant: 'destructive' });
     } finally {
@@ -112,7 +115,7 @@ export default function FamilyCodePage() {
           <Button
             size="lg"
             className="w-full"
-            onClick={() => setFamily(useFamilyStore.getState().familyId!, createdCode)}
+            onClick={() => navigate('/', { replace: true })}
           >
             Let's go! <ArrowRight className="ml-1 h-4 w-4" />
           </Button>

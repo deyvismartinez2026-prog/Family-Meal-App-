@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { format, subDays } from 'date-fns';
-import { Shuffle, Plus, ThumbsUp, ThumbsDown, Star } from 'lucide-react';
+import { Shuffle, Plus, ThumbsUp, ThumbsDown, Star, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -22,6 +22,16 @@ type FilterState = {
 
 type RestaurantWithWeight = Restaurant & { weight: number; lastOrdered: string | null };
 
+type RestaurantDraft = {
+  name: string; emoji: string; cuisine: string; price_tier: '$' | '$$' | '$$$';
+  typical_dish: string; delivery_apps: string[]; avg_delivery_min: number; notes: string;
+};
+
+const EMPTY_DRAFT: RestaurantDraft = {
+  name: '', emoji: '🍽️', cuisine: '', price_tier: '$',
+  typical_dish: '', delivery_apps: [], avg_delivery_min: 30, notes: '',
+};
+
 export default function TakeoutPage() {
   const familyId = useFamilyStore((s) => s.familyId);
   const queryClient = useQueryClient();
@@ -32,11 +42,9 @@ export default function TakeoutPage() {
   const [filters, setFilters] = useState<FilterState>({ cuisine: null, priceTier: null });
   const [picked, setPicked] = useState<RestaurantWithWeight | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [editRestaurant, setEditRestaurant] = useState<Restaurant | null>(null);
+  const [draft, setDraft] = useState<RestaurantDraft>(EMPTY_DRAFT);
   const [spinEmoji, setSpinEmoji] = useState('🎲');
-  const [newRestaurant, setNewRestaurant] = useState({
-    name: '', emoji: '🍽️', cuisine: '', price_tier: '$' as '$' | '$$' | '$$$',
-    typical_dish: '', delivery_apps: [] as string[], avg_delivery_min: 30, notes: '',
-  });
 
   const { data: restaurants = [], isLoading } = useQuery({
     queryKey: ['restaurants', familyId],
@@ -56,31 +64,47 @@ export default function TakeoutPage() {
     },
   });
 
-  const addRestaurant = useMutation({
+  const saveRestaurant = useMutation({
     mutationFn: async () => {
-      const { error } = await supabase.from('restaurants').insert({
-        family_id: familyId!,
-        ...newRestaurant,
-        is_active: true,
-      });
+      if (editRestaurant) {
+        const { error } = await supabase.from('restaurants').update({
+          name: draft.name, emoji: draft.emoji, cuisine: draft.cuisine,
+          price_tier: draft.price_tier, typical_dish: draft.typical_dish,
+          delivery_apps: draft.delivery_apps, avg_delivery_min: draft.avg_delivery_min, notes: draft.notes,
+        }).eq('id', editRestaurant.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('restaurants').insert({
+          family_id: familyId!, ...draft, is_active: true,
+        });
+        if (error) throw error;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['restaurants', familyId] });
+      closeDialog();
+      toast({ title: editRestaurant ? 'Restaurant updated! ✓' : 'Restaurant added! 🎉' });
+    },
+    onError: (e) => toast({ title: 'Error', description: String(e), variant: 'destructive' }),
+  });
+
+  const deleteRestaurant = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.from('restaurants').update({ is_active: false }).eq('id', id);
       if (error) throw error;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['restaurants', familyId] });
-      setAddOpen(false);
-      setNewRestaurant({ name: '', emoji: '🍽️', cuisine: '', price_tier: '$', typical_dish: '', delivery_apps: [], avg_delivery_min: 30, notes: '' });
-      toast({ title: 'Restaurant added! 🎉' });
+      closeDialog();
+      toast({ title: 'Restaurant removed' });
     },
-    onError: (e) => toast({ title: 'Error', description: String(e), variant: 'destructive' }),
   });
 
   const logTakeout = useMutation({
     mutationFn: async (restaurant: RestaurantWithWeight) => {
       const { error } = await supabase.from('takeout_history').insert({
-        family_id: familyId!,
-        restaurant_id: restaurant.id,
-        date: format(new Date(), 'yyyy-MM-dd'),
-        picked_by: 'Family',
+        family_id: familyId!, restaurant_id: restaurant.id,
+        date: format(new Date(), 'yyyy-MM-dd'), picked_by: 'Family',
       });
       if (error) throw error;
     },
@@ -89,6 +113,18 @@ export default function TakeoutPage() {
       toast({ title: '🍕 Order logged!' });
     },
   });
+
+  function openAdd() { setEditRestaurant(null); setDraft(EMPTY_DRAFT); setAddOpen(true); }
+  function openEdit(r: Restaurant) {
+    setEditRestaurant(r);
+    setDraft({
+      name: r.name, emoji: r.emoji, cuisine: r.cuisine, price_tier: r.price_tier,
+      typical_dish: r.typical_dish, delivery_apps: r.delivery_apps,
+      avg_delivery_min: r.avg_delivery_min ?? 30, notes: r.notes ?? '',
+    });
+    setAddOpen(true);
+  }
+  function closeDialog() { setAddOpen(false); setEditRestaurant(null); setDraft(EMPTY_DRAFT); }
 
   function computeWeights(exclude?: Set<string>): RestaurantWithWeight[] {
     const threeDaysAgo = format(subDays(new Date(), 3), 'yyyy-MM-dd');
@@ -106,11 +142,7 @@ export default function TakeoutPage() {
       .map((r) => {
         const lastOrder = history.find((h) => h.restaurant_id === r.id);
         const recentlyOrdered = lastOrder && lastOrder.date >= fourteenDaysAgo;
-        return {
-          ...r,
-          weight: recentlyOrdered ? 0.3 : 1.0,
-          lastOrdered: lastOrder?.date ?? null,
-        };
+        return { ...r, weight: recentlyOrdered ? 0.3 : 1.0, lastOrdered: lastOrder?.date ?? null };
       });
   }
 
@@ -126,11 +158,7 @@ export default function TakeoutPage() {
       let rand = Math.random() * remWeight;
       for (const r of remaining) {
         rand -= r.weight;
-        if (rand <= 0) {
-          picked.push(r);
-          usedIds.add(r.id);
-          break;
-        }
+        if (rand <= 0) { picked.push(r); usedIds.add(r.id); break; }
       }
     }
     return picked;
@@ -149,10 +177,7 @@ export default function TakeoutPage() {
 
     const emojis = ['🎲', '🎰', '🎯', '🎪', '🎨'];
     let i = 0;
-    const interval = setInterval(() => {
-      setSpinEmoji(emojis[i % emojis.length]);
-      i++;
-    }, 150);
+    const interval = setInterval(() => { setSpinEmoji(emojis[i % emojis.length]); i++; }, 150);
 
     await new Promise((r) => setTimeout(r, 1500));
     clearInterval(interval);
@@ -165,10 +190,7 @@ export default function TakeoutPage() {
   }
 
   function handleVeto(id: string) {
-    if (vetoUsed) {
-      toast({ title: 'One veto per round! Pick from what\'s left.' });
-      return;
-    }
+    if (vetoUsed) { toast({ title: 'One veto per round! Pick from what\'s left.' }); return; }
     setVetoUsed(true);
     const newVetoed = new Set([...vetoed, id]);
     setVetoed(newVetoed);
@@ -190,7 +212,7 @@ export default function TakeoutPage() {
     <div className="p-4 space-y-4 animate-fade-in">
       <div className="flex items-center justify-between pt-2">
         <h1 className="text-2xl font-bold">Takeout</h1>
-        <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
+        <Button size="sm" variant="outline" onClick={openAdd}>
           <Plus className="mr-1 h-4 w-4" /> Add
         </Button>
       </div>
@@ -203,7 +225,6 @@ export default function TakeoutPage() {
         </TabsList>
 
         <TabsContent value="spin" className="space-y-4 mt-4">
-          {/* Filters */}
           <Card>
             <CardContent className="pt-4 pb-3 space-y-3">
               <p className="text-sm font-semibold">Filters (optional)</p>
@@ -228,21 +249,12 @@ export default function TakeoutPage() {
             </CardContent>
           </Card>
 
-          {/* Spin button */}
           {!finalists.length && !picked && (
             <div className="flex flex-col items-center py-6 gap-4">
-              <div
-                className={`text-8xl transition-transform ${spinning ? 'animate-bounce' : ''}`}
-                style={{ userSelect: 'none' }}
-              >
+              <div className={`text-8xl transition-transform ${spinning ? 'animate-bounce' : ''}`} style={{ userSelect: 'none' }}>
                 {spinEmoji}
               </div>
-              <Button
-                size="lg"
-                className="w-48 text-lg font-bold h-14"
-                onClick={handleSpin}
-                disabled={spinning || isLoading}
-              >
+              <Button size="lg" className="w-48 text-lg font-bold h-14" onClick={handleSpin} disabled={spinning || isLoading}>
                 {spinning ? 'Spinning...' : 'SPIN! 🎰'}
               </Button>
               {restaurants.length === 0 && !isLoading && (
@@ -251,7 +263,6 @@ export default function TakeoutPage() {
             </div>
           )}
 
-          {/* Finalists */}
           {finalists.length > 0 && (
             <div className="space-y-3">
               <p className="text-sm font-semibold text-center text-muted-foreground">🎯 Your finalists — pick one!</p>
@@ -276,13 +287,7 @@ export default function TakeoutPage() {
                         <Button size="sm" className="gap-1" onClick={() => handlePick(r)}>
                           <ThumbsUp className="h-4 w-4" /> Pick
                         </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="gap-1"
-                          onClick={() => handleVeto(r.id)}
-                          disabled={vetoUsed}
-                        >
+                        <Button size="sm" variant="outline" className="gap-1" onClick={() => handleVeto(r.id)} disabled={vetoUsed}>
                           <ThumbsDown className="h-4 w-4" /> Veto
                         </Button>
                       </div>
@@ -296,7 +301,6 @@ export default function TakeoutPage() {
             </div>
           )}
 
-          {/* Picked */}
           {picked && (
             <div className="flex flex-col items-center py-6 gap-4 text-center animate-fade-in">
               <div className="text-6xl">{picked.emoji}</div>
@@ -321,7 +325,7 @@ export default function TakeoutPage() {
               <p className="text-5xl mb-3">🍕</p>
               <p className="font-semibold">No restaurants yet</p>
               <p className="text-sm text-muted-foreground mb-4">Add your favorites to spin!</p>
-              <Button onClick={() => setAddOpen(true)}><Plus className="mr-2 h-4 w-4" /> Add restaurant</Button>
+              <Button onClick={openAdd}><Plus className="mr-2 h-4 w-4" /> Add restaurant</Button>
             </div>
           ) : (
             restaurants.map((r) => {
@@ -339,10 +343,18 @@ export default function TakeoutPage() {
                         </p>
                       )}
                     </div>
-                    <div className="flex gap-1">
-                      {r.delivery_apps.map((app) => (
-                        <Badge key={app} variant="outline" className="text-xs">{app}</Badge>
-                      ))}
+                    <div className="flex items-center gap-2">
+                      <div className="flex gap-1">
+                        {r.delivery_apps.map((app) => (
+                          <Badge key={app} variant="outline" className="text-xs">{app}</Badge>
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => openEdit(r)}
+                        className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
                     </div>
                   </CardContent>
                 </Card>
@@ -384,34 +396,34 @@ export default function TakeoutPage() {
         </TabsContent>
       </Tabs>
 
-      {/* Add Restaurant Dialog */}
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+      {/* Add / Edit Restaurant Dialog */}
+      <Dialog open={addOpen} onOpenChange={(o) => !o && closeDialog()}>
         <DialogContent className="max-h-[85vh] overflow-y-auto mx-4">
           <DialogHeader>
-            <DialogTitle>Add Restaurant</DialogTitle>
+            <DialogTitle>{editRestaurant ? 'Edit Restaurant' : 'Add Restaurant'}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <div className="flex gap-2">
               <div className="w-16">
                 <Label className="text-xs">Emoji</Label>
-                <Input value={newRestaurant.emoji} onChange={(e) => setNewRestaurant((p) => ({ ...p, emoji: e.target.value }))} className="text-center text-xl" maxLength={2} />
+                <Input value={draft.emoji} onChange={(e) => setDraft((p) => ({ ...p, emoji: e.target.value }))} className="text-center text-xl" maxLength={2} />
               </div>
               <div className="flex-1">
                 <Label className="text-xs">Restaurant name *</Label>
-                <Input placeholder="Pizza Palace" value={newRestaurant.name} onChange={(e) => setNewRestaurant((p) => ({ ...p, name: e.target.value }))} />
+                <Input placeholder="Pizza Palace" value={draft.name} onChange={(e) => setDraft((p) => ({ ...p, name: e.target.value }))} />
               </div>
             </div>
             <div className="flex gap-2">
               <div className="flex-1">
                 <Label className="text-xs">Cuisine</Label>
-                <Input placeholder="Italian, Mexican..." value={newRestaurant.cuisine} onChange={(e) => setNewRestaurant((p) => ({ ...p, cuisine: e.target.value }))} />
+                <Input placeholder="Italian, Mexican..." value={draft.cuisine} onChange={(e) => setDraft((p) => ({ ...p, cuisine: e.target.value }))} />
               </div>
               <div className="w-24">
                 <Label className="text-xs">Price</Label>
                 <div className="flex gap-1 mt-1">
                   {(['$', '$$', '$$$'] as const).map((t) => (
-                    <button key={t} onClick={() => setNewRestaurant((p) => ({ ...p, price_tier: t }))}
-                      className={`flex-1 py-2 rounded-lg border text-sm transition-colors ${newRestaurant.price_tier === t ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted'}`}>
+                    <button key={t} onClick={() => setDraft((p) => ({ ...p, price_tier: t }))}
+                      className={`flex-1 py-2 rounded-lg border text-sm transition-colors ${draft.price_tier === t ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted'}`}>
                       {t}
                     </button>
                   ))}
@@ -420,15 +432,15 @@ export default function TakeoutPage() {
             </div>
             <div>
               <Label className="text-xs">Go-to dish</Label>
-              <Input placeholder="Margherita pizza" value={newRestaurant.typical_dish} onChange={(e) => setNewRestaurant((p) => ({ ...p, typical_dish: e.target.value }))} />
+              <Input placeholder="Margherita pizza" value={draft.typical_dish} onChange={(e) => setDraft((p) => ({ ...p, typical_dish: e.target.value }))} />
             </div>
             <div>
               <Label className="text-xs">Delivery apps</Label>
               <div className="flex gap-2 mt-1">
                 {['DoorDash', 'UberEats', 'Direct'].map((app) => (
                   <button key={app}
-                    onClick={() => setNewRestaurant((p) => ({ ...p, delivery_apps: p.delivery_apps.includes(app) ? p.delivery_apps.filter((a) => a !== app) : [...p.delivery_apps, app] }))}
-                    className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${newRestaurant.delivery_apps.includes(app) ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted'}`}>
+                    onClick={() => setDraft((p) => ({ ...p, delivery_apps: p.delivery_apps.includes(app) ? p.delivery_apps.filter((a) => a !== app) : [...p.delivery_apps, app] }))}
+                    className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${draft.delivery_apps.includes(app) ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted'}`}>
                     {app}
                   </button>
                 ))}
@@ -436,9 +448,19 @@ export default function TakeoutPage() {
             </div>
           </div>
           <DialogFooter className="flex-row gap-2">
-            <Button variant="outline" className="flex-1" onClick={() => setAddOpen(false)}>Cancel</Button>
-            <Button className="flex-1" disabled={!newRestaurant.name.trim() || addRestaurant.isPending} onClick={() => addRestaurant.mutate()}>
-              Save Restaurant
+            {editRestaurant && (
+              <Button
+                variant="outline"
+                className="text-destructive hover:bg-destructive/10 border-destructive/30"
+                onClick={() => { if (confirm('Remove this restaurant?')) deleteRestaurant.mutate(editRestaurant.id); }}
+                disabled={deleteRestaurant.isPending}
+              >
+                Remove
+              </Button>
+            )}
+            <Button variant="outline" className="flex-1" onClick={closeDialog}>Cancel</Button>
+            <Button className="flex-1" disabled={!draft.name.trim() || saveRestaurant.isPending} onClick={() => saveRestaurant.mutate()}>
+              {editRestaurant ? 'Save Changes' : 'Save Restaurant'}
             </Button>
           </DialogFooter>
         </DialogContent>

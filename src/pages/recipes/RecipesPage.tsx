@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Search, Clock, Zap, X } from 'lucide-react';
+import { Plus, Search, Clock, Zap, X, Pencil } from 'lucide-react';
 import { useForm, useFieldArray } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -55,12 +55,31 @@ const recipeSchema = z.object({
 
 type RecipeForm = z.infer<typeof recipeSchema>;
 
+const EMPTY_DEFAULTS: RecipeForm = {
+  emoji: '🍽️',
+  name: '',
+  base_servings: 3.5,
+  active_time_min: 20,
+  total_time_min: 30,
+  tags: [],
+  ingredients: [{ emoji: '🥩', name: '', quantity: 1, unit: 'lb', store_preference: 'target', trip_type: 'weekly' }],
+  steps: [{ instruction: '', timer_seconds: null }],
+  calories_per_serving: null,
+  protein_g: null,
+  carbs_g: null,
+  fat_g: null,
+  kid_version_notes: '',
+  make_ahead_notes: '',
+  source_url: '',
+};
+
 export default function RecipesPage() {
   const familyId = useFamilyStore((s) => s.familyId);
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
   const [activeTag, setActiveTag] = useState<string | null>(null);
-  const [addOpen, setAddOpen] = useState(false);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingRecipe, setEditingRecipe] = useState<Recipe | null>(null);
   const [viewRecipe, setViewRecipe] = useState<Recipe | null>(null);
 
   const { data: recipes = [], isLoading } = useQuery({
@@ -75,47 +94,109 @@ export default function RecipesPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { register, handleSubmit, control, watch, setValue, reset, formState: { errors } } = useForm<RecipeForm>({
     resolver: zodResolver(recipeSchema) as any,
-    defaultValues: {
-      emoji: '🍽️',
-      base_servings: 3.5,
-      active_time_min: 20,
-      total_time_min: 30,
-      tags: [],
-      ingredients: [{ emoji: '🥩', name: '', quantity: 1, unit: 'lb', store_preference: 'target', trip_type: 'weekly' }],
-      steps: [{ instruction: '', timer_seconds: null }],
-    },
+    defaultValues: EMPTY_DEFAULTS,
   });
 
   const { fields: ingredientFields, append: appendIngredient, remove: removeIngredient } = useFieldArray({ control, name: 'ingredients' });
   const { fields: stepFields, append: appendStep, remove: removeStep } = useFieldArray({ control, name: 'steps' });
   const watchedTags = watch('tags');
 
+  function openAdd() {
+    setEditingRecipe(null);
+    reset(EMPTY_DEFAULTS);
+    setFormOpen(true);
+  }
+
+  async function openEdit(recipe: Recipe) {
+    setEditingRecipe(recipe);
+    setViewRecipe(null);
+
+    const [{ data: ings }, { data: steps }] = await Promise.all([
+      supabase.from('ingredients').select().eq('recipe_id', recipe.id),
+      supabase.from('recipe_steps').select().eq('recipe_id', recipe.id).order('step_number'),
+    ]);
+
+    reset({
+      name: recipe.name,
+      emoji: recipe.emoji,
+      active_time_min: recipe.active_time_min,
+      total_time_min: recipe.total_time_min,
+      base_servings: recipe.base_servings,
+      calories_per_serving: recipe.calories_per_serving ?? null,
+      protein_g: recipe.protein_g ?? null,
+      carbs_g: recipe.carbs_g ?? null,
+      fat_g: recipe.fat_g ?? null,
+      kid_version_notes: recipe.kid_version_notes ?? '',
+      make_ahead_notes: recipe.make_ahead_notes ?? '',
+      source_url: recipe.source_url ?? '',
+      tags: recipe.tags ?? [],
+      ingredients: (ings ?? []).map((i: Record<string, unknown>) => ({
+        emoji: String(i.emoji ?? '🥄'),
+        name: String(i.name ?? ''),
+        quantity: Number(i.quantity ?? 1),
+        unit: String(i.unit ?? ''),
+        store_preference: (i.store_preference as RecipeForm['ingredients'][0]['store_preference']) ?? 'any',
+        trip_type: (i.trip_type as RecipeForm['ingredients'][0]['trip_type']) ?? 'any',
+      })),
+      steps: (steps ?? []).map((s: Record<string, unknown>) => ({
+        instruction: String(s.instruction ?? ''),
+        timer_seconds: s.timer_seconds != null ? Number(s.timer_seconds) : null,
+      })),
+    });
+
+    setFormOpen(true);
+  }
+
   const saveRecipe = useMutation({
     mutationFn: async (values: RecipeForm) => {
       const { ingredients, steps, ...recipeData } = values;
-      const { data: recipe, error } = await supabase
-        .from('recipes')
-        .insert({ ...recipeData, family_id: familyId!, nutrition_confidence: 'med' })
-        .select()
-        .single();
-      if (error) throw error;
 
-      if (ingredients.length > 0) {
-        await supabase.from('ingredients').insert(
-          ingredients.map((ing) => ({ ...ing, recipe_id: recipe.id }))
-        );
-      }
-      if (steps.length > 0) {
-        await supabase.from('recipe_steps').insert(
-          steps.map((s, idx) => ({ ...s, recipe_id: recipe.id, step_number: idx + 1 }))
-        );
+      if (editingRecipe) {
+        const { error } = await supabase
+          .from('recipes')
+          .update({ ...recipeData, nutrition_confidence: 'med' })
+          .eq('id', editingRecipe.id);
+        if (error) throw error;
+
+        await supabase.from('ingredients').delete().eq('recipe_id', editingRecipe.id);
+        await supabase.from('recipe_steps').delete().eq('recipe_id', editingRecipe.id);
+
+        if (ingredients.length > 0) {
+          await supabase.from('ingredients').insert(
+            ingredients.map((ing) => ({ ...ing, recipe_id: editingRecipe.id }))
+          );
+        }
+        if (steps.length > 0) {
+          await supabase.from('recipe_steps').insert(
+            steps.map((s, idx) => ({ ...s, recipe_id: editingRecipe.id, step_number: idx + 1 }))
+          );
+        }
+      } else {
+        const { data: recipe, error } = await supabase
+          .from('recipes')
+          .insert({ ...recipeData, family_id: familyId!, nutrition_confidence: 'med' })
+          .select()
+          .single();
+        if (error) throw error;
+
+        if (ingredients.length > 0) {
+          await supabase.from('ingredients').insert(
+            ingredients.map((ing) => ({ ...ing, recipe_id: recipe.id }))
+          );
+        }
+        if (steps.length > 0) {
+          await supabase.from('recipe_steps').insert(
+            steps.map((s, idx) => ({ ...s, recipe_id: recipe.id, step_number: idx + 1 }))
+          );
+        }
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['recipes', familyId] });
-      setAddOpen(false);
-      reset();
-      toast({ title: 'Recipe saved! 🎉' });
+      setFormOpen(false);
+      setEditingRecipe(null);
+      reset(EMPTY_DEFAULTS);
+      toast({ title: editingRecipe ? 'Recipe updated! ✓' : 'Recipe saved! 🎉' });
     },
     onError: (e) => toast({ title: 'Error', description: String(e), variant: 'destructive' }),
   });
@@ -142,15 +223,13 @@ export default function RecipesPage() {
 
   return (
     <div className="p-4 space-y-4 animate-fade-in">
-      {/* Header */}
       <div className="flex items-center justify-between pt-2">
         <h1 className="text-2xl font-bold">Recipes</h1>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
+        <Button size="sm" onClick={openAdd}>
           <Plus className="mr-1 h-4 w-4" /> Add
         </Button>
       </div>
 
-      {/* Search */}
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
@@ -161,7 +240,6 @@ export default function RecipesPage() {
         />
       </div>
 
-      {/* Tag filters */}
       {allTags.length > 0 && (
         <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
           <button
@@ -186,7 +264,6 @@ export default function RecipesPage() {
         </div>
       )}
 
-      {/* Recipe grid */}
       {isLoading ? (
         <div className="grid grid-cols-2 gap-3">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -194,15 +271,11 @@ export default function RecipesPage() {
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <EmptyState onAdd={() => setAddOpen(true)} hasSearch={!!search || !!activeTag} />
+        <EmptyState onAdd={openAdd} hasSearch={!!search || !!activeTag} />
       ) : (
         <div className="grid grid-cols-2 gap-3">
           {filtered.map((recipe) => (
-            <button
-              key={recipe.id}
-              onClick={() => setViewRecipe(recipe)}
-              className="text-left"
-            >
+            <button key={recipe.id} onClick={() => setViewRecipe(recipe)} className="text-left">
               <Card className="overflow-hidden hover:shadow-md transition-shadow active:scale-[0.98]">
                 <CardContent className="p-3 space-y-2">
                   <div className="text-4xl">{recipe.emoji}</div>
@@ -239,10 +312,20 @@ export default function RecipesPage() {
           {viewRecipe && (
             <>
               <DialogHeader>
-                <DialogTitle className="flex items-center gap-3 text-xl">
-                  <span className="text-4xl">{viewRecipe.emoji}</span>
-                  {viewRecipe.name}
-                </DialogTitle>
+                <div className="flex items-start justify-between gap-2">
+                  <DialogTitle className="flex items-center gap-3 text-xl">
+                    <span className="text-4xl">{viewRecipe.emoji}</span>
+                    {viewRecipe.name}
+                  </DialogTitle>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="flex-shrink-0 mt-1"
+                    onClick={() => openEdit(viewRecipe)}
+                  >
+                    <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
+                  </Button>
+                </div>
               </DialogHeader>
               <RecipeDetail recipe={viewRecipe} onDelete={() => deleteRecipe.mutate(viewRecipe.id)} />
             </>
@@ -250,14 +333,13 @@ export default function RecipesPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Add Recipe Dialog */}
-      <Dialog open={addOpen} onOpenChange={(o) => { if (!o) { setAddOpen(false); reset(); } }}>
+      {/* Add / Edit Recipe Dialog */}
+      <Dialog open={formOpen} onOpenChange={(o) => { if (!o) { setFormOpen(false); setEditingRecipe(null); reset(EMPTY_DEFAULTS); } }}>
         <DialogContent className="max-h-[90vh] overflow-y-auto mx-2 max-w-lg">
           <DialogHeader>
-            <DialogTitle>New Recipe</DialogTitle>
+            <DialogTitle>{editingRecipe ? `Edit: ${editingRecipe.name}` : 'New Recipe'}</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleSubmit((v) => saveRecipe.mutate(v as RecipeForm))} className="space-y-4">
-            {/* Basic info */}
             <div className="flex gap-2">
               <div className="w-16">
                 <Label className="text-xs">Emoji</Label>
@@ -284,7 +366,6 @@ export default function RecipesPage() {
               </div>
             </div>
 
-            {/* Nutrition */}
             <div>
               <Label className="text-xs font-semibold">Nutrition (per serving)</Label>
               <div className="grid grid-cols-4 gap-2 mt-1">
@@ -299,7 +380,6 @@ export default function RecipesPage() {
               </div>
             </div>
 
-            {/* Tags */}
             <div>
               <Label className="text-xs font-semibold">Tags</Label>
               <div className="flex flex-wrap gap-2 mt-1">
@@ -321,7 +401,6 @@ export default function RecipesPage() {
               </div>
             </div>
 
-            {/* Ingredients */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <Label className="text-xs font-semibold">Ingredients</Label>
@@ -344,7 +423,6 @@ export default function RecipesPage() {
               </div>
             </div>
 
-            {/* Steps */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <Label className="text-xs font-semibold">Steps</Label>
@@ -365,16 +443,20 @@ export default function RecipesPage() {
               </div>
             </div>
 
-            {/* Notes */}
             <div>
               <Label className="text-xs">Kid version notes</Label>
               <Textarea {...register('kid_version_notes')} placeholder="For the kids, serve without spice..." className="mt-1" />
             </div>
 
+            <div>
+              <Label className="text-xs">Make-ahead notes</Label>
+              <Textarea {...register('make_ahead_notes')} placeholder="Can be prepped 2 days ahead..." className="mt-1" />
+            </div>
+
             <DialogFooter className="flex-row gap-2 pt-2">
-              <Button type="button" variant="outline" className="flex-1" onClick={() => { setAddOpen(false); reset(); }}>Cancel</Button>
+              <Button type="button" variant="outline" className="flex-1" onClick={() => { setFormOpen(false); setEditingRecipe(null); reset(EMPTY_DEFAULTS); }}>Cancel</Button>
               <Button type="submit" className="flex-1" disabled={saveRecipe.isPending}>
-                {saveRecipe.isPending ? 'Saving...' : 'Save Recipe'}
+                {saveRecipe.isPending ? 'Saving...' : editingRecipe ? 'Save Changes' : 'Save Recipe'}
               </Button>
             </DialogFooter>
           </form>
@@ -404,7 +486,6 @@ function RecipeDetail({ recipe, onDelete }: { recipe: Recipe; onDelete: () => vo
 
   return (
     <div className="space-y-4">
-      {/* Quick stats */}
       <div className="grid grid-cols-3 gap-2 text-center">
         <div className="bg-muted/50 rounded-xl p-2">
           <p className="text-xs text-muted-foreground">Active</p>
@@ -420,7 +501,6 @@ function RecipeDetail({ recipe, onDelete }: { recipe: Recipe; onDelete: () => vo
         </div>
       </div>
 
-      {/* Macros */}
       {recipe.protein_g && (
         <div className="flex gap-3 text-sm">
           {recipe.calories_per_serving && (
@@ -448,7 +528,6 @@ function RecipeDetail({ recipe, onDelete }: { recipe: Recipe; onDelete: () => vo
         </div>
       )}
 
-      {/* Tags */}
       {recipe.tags.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {recipe.tags.map((tag) => (
@@ -457,40 +536,37 @@ function RecipeDetail({ recipe, onDelete }: { recipe: Recipe; onDelete: () => vo
         </div>
       )}
 
-      {/* Ingredients */}
       {ingredients.length > 0 && (
         <div>
           <h3 className="font-semibold mb-2">Ingredients</h3>
           <ul className="space-y-1.5">
-            {ingredients.map((ing) => (
-              <li key={ing.id} className="flex items-center gap-2 text-sm">
-                <span>{ing.emoji}</span>
-                <span className="flex-1">{ing.name}</span>
-                <span className="text-muted-foreground">{ing.quantity} {ing.unit}</span>
+            {ingredients.map((ing: Record<string, unknown>) => (
+              <li key={String(ing.id)} className="flex items-center gap-2 text-sm">
+                <span>{String(ing.emoji)}</span>
+                <span className="flex-1">{String(ing.name)}</span>
+                <span className="text-muted-foreground">{String(ing.quantity)} {String(ing.unit)}</span>
               </li>
             ))}
           </ul>
         </div>
       )}
 
-      {/* Steps */}
       {steps.length > 0 && (
         <div>
           <h3 className="font-semibold mb-2">Steps</h3>
           <ol className="space-y-2">
-            {steps.map((step) => (
-              <li key={step.id} className="flex gap-3 text-sm">
+            {steps.map((step: Record<string, unknown>) => (
+              <li key={String(step.id)} className="flex gap-3 text-sm">
                 <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-bold">
-                  {step.step_number}
+                  {Number(step.step_number)}
                 </span>
-                <span className="flex-1 pt-0.5">{step.instruction}</span>
+                <span className="flex-1 pt-0.5">{String(step.instruction)}</span>
               </li>
             ))}
           </ol>
         </div>
       )}
 
-      {/* Kid notes */}
       {recipe.kid_version_notes && (
         <div className="bg-yellow-50 dark:bg-yellow-900/20 rounded-xl p-3">
           <p className="text-sm font-semibold text-yellow-800 dark:text-yellow-200 mb-1">🧒 Kid version</p>
@@ -498,7 +574,13 @@ function RecipeDetail({ recipe, onDelete }: { recipe: Recipe; onDelete: () => vo
         </div>
       )}
 
-      {/* Delete */}
+      {recipe.make_ahead_notes && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-3">
+          <p className="text-sm font-semibold text-blue-800 dark:text-blue-200 mb-1">⏰ Make ahead</p>
+          <p className="text-sm text-blue-700 dark:text-blue-300">{recipe.make_ahead_notes}</p>
+        </div>
+      )}
+
       <Button
         variant="outline"
         className="w-full text-destructive hover:bg-destructive/10 border-destructive/30"

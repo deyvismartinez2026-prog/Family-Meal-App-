@@ -12,13 +12,21 @@ import { useFamilyStore } from '@/store/familyStore';
 import { toast } from '@/hooks/use-toast';
 import type { MealPlan, Recipe } from '@/types/database';
 
+type SlotType = 'lunch_main' | 'lunch_side' | 'dinner_main' | 'dinner_side';
 type MealPlanWithRecipe = MealPlan & { recipes: Recipe | null };
+
+const SLOT_ROLE: Record<SlotType, string> = {
+  lunch_main: 'Main Dish',
+  lunch_side: 'Side Dish',
+  dinner_main: 'Main Dish',
+  dinner_side: 'Side Dish',
+};
 
 export default function PlanPage() {
   const familyId = useFamilyStore((s) => s.familyId);
   const queryClient = useQueryClient();
   const [weekOffset, setWeekOffset] = useState(0);
-  const [addModal, setAddModal] = useState<{ date: string; meal_type: 'lunch' | 'dinner' } | null>(null);
+  const [addModal, setAddModal] = useState<{ date: string; slot: SlotType } | null>(null);
   const [recipeSearch, setRecipeSearch] = useState('');
 
   const weekStart = startOfWeek(addWeeks(new Date(), weekOffset), { weekStartsOn: 1 });
@@ -53,19 +61,19 @@ export default function PlanPage() {
   const addMeal = useMutation({
     mutationFn: async ({
       date,
-      meal_type,
+      slot,
       recipe_id,
       chef_night_off,
     }: {
       date: string;
-      meal_type: 'lunch' | 'dinner';
+      slot: SlotType;
       recipe_id?: string;
       chef_night_off?: boolean;
     }) => {
       const { error } = await supabase.from('meal_plan').upsert({
         family_id: familyId!,
         date,
-        meal_type,
+        meal_type: slot,
         recipe_id: recipe_id ?? null,
         chef_night_off: chef_night_off ?? false,
       });
@@ -74,6 +82,7 @@ export default function PlanPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['meal_plan', familyId, weekStartStr] });
       setAddModal(null);
+      setRecipeSearch('');
       toast({ title: 'Meal planned! 🎉' });
     },
     onError: (e) => toast({ title: 'Error', description: String(e), variant: 'destructive' }),
@@ -90,13 +99,17 @@ export default function PlanPage() {
     },
   });
 
-  function getPlan(date: string, meal_type: 'lunch' | 'dinner') {
-    return plans.find((p) => p.date === date && p.meal_type === meal_type);
+  function getPlan(date: string, slot: SlotType) {
+    return plans.find((p) => p.date === date && p.meal_type === slot);
   }
 
   const filteredRecipes = recipes.filter((r) =>
     r.name.toLowerCase().includes(recipeSearch.toLowerCase())
   );
+
+  const dialogTitle = addModal
+    ? `${addModal.slot.startsWith('lunch') ? '☀️ Lunch' : '🌙 Dinner'} – ${SLOT_ROLE[addModal.slot]} · ${format(new Date(addModal.date + 'T12:00:00'), 'EEE, MMM d')}`
+    : '';
 
   return (
     <div className="p-4 space-y-4 animate-fade-in">
@@ -135,41 +148,46 @@ export default function PlanPage() {
       {isLoading ? (
         <div className="space-y-3">
           {Array.from({ length: 7 }).map((_, i) => (
-            <Skeleton key={i} className="h-24 w-full rounded-2xl" />
+            <Skeleton key={i} className="h-36 w-full rounded-2xl" />
           ))}
         </div>
       ) : (
         <div className="space-y-3">
           {weekDays.map((day) => {
             const dateStr = format(day, 'yyyy-MM-dd');
-            const lunchPlan = getPlan(dateStr, 'lunch');
-            const dinnerPlan = getPlan(dateStr, 'dinner');
-
             return (
               <Card
                 key={dateStr}
                 className={`overflow-hidden ${isToday(day) ? 'ring-2 ring-primary/40' : ''}`}
               >
-                <div className="flex items-center gap-3 px-4 py-2 bg-muted/30">
+                <div className="flex gap-3 px-4 py-3 bg-muted/30">
                   <div
-                    className={`flex flex-col items-center w-10 ${
+                    className={`flex flex-col items-center w-10 pt-0.5 flex-shrink-0 ${
                       isToday(day) ? 'text-primary' : 'text-foreground'
                     }`}
                   >
                     <span className="text-xs font-semibold uppercase">{format(day, 'EEE')}</span>
                     <span className="text-lg font-bold leading-tight">{format(day, 'd')}</span>
                   </div>
-                  <div className="flex-1 space-y-1.5">
-                    <MealSlot
+
+                  <div className="flex-1 space-y-2.5 min-w-0">
+                    <MealSection
                       label="Lunch"
-                      plan={lunchPlan}
-                      onAdd={() => setAddModal({ date: dateStr, meal_type: 'lunch' })}
+                      emoji="☀️"
+                      mainPlan={getPlan(dateStr, 'lunch_main')}
+                      sidePlan={getPlan(dateStr, 'lunch_side')}
+                      onAddMain={() => setAddModal({ date: dateStr, slot: 'lunch_main' })}
+                      onAddSide={() => setAddModal({ date: dateStr, slot: 'lunch_side' })}
                       onRemove={(id) => removeMeal.mutate(id)}
                     />
-                    <MealSlot
+                    <div className="border-t border-dashed border-border/50" />
+                    <MealSection
                       label="Dinner"
-                      plan={dinnerPlan}
-                      onAdd={() => setAddModal({ date: dateStr, meal_type: 'dinner' })}
+                      emoji="🌙"
+                      mainPlan={getPlan(dateStr, 'dinner_main')}
+                      sidePlan={getPlan(dateStr, 'dinner_side')}
+                      onAddMain={() => setAddModal({ date: dateStr, slot: 'dinner_main' })}
+                      onAddSide={() => setAddModal({ date: dateStr, slot: 'dinner_side' })}
                       onRemove={(id) => removeMeal.mutate(id)}
                     />
                   </div>
@@ -181,17 +199,10 @@ export default function PlanPage() {
       )}
 
       {/* Add Meal Dialog */}
-      <Dialog open={!!addModal} onOpenChange={(o) => !o && setAddModal(null)}>
+      <Dialog open={!!addModal} onOpenChange={(o) => { if (!o) { setAddModal(null); setRecipeSearch(''); } }}>
         <DialogContent className="max-h-[85vh] overflow-y-auto mx-4">
           <DialogHeader>
-            <DialogTitle>
-              Pick a meal for{' '}
-              {addModal
-                ? format(new Date(addModal.date + 'T12:00:00'), 'EEE, MMM d') +
-                  ' ' +
-                  addModal.meal_type
-                : ''}
-            </DialogTitle>
+            <DialogTitle>{dialogTitle}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <input
@@ -201,19 +212,17 @@ export default function PlanPage() {
               value={recipeSearch}
               onChange={(e) => setRecipeSearch(e.target.value)}
             />
-            <Button
-              variant="outline"
-              className="w-full"
-              onClick={() =>
-                addMeal.mutate({
-                  date: addModal!.date,
-                  meal_type: addModal!.meal_type,
-                  chef_night_off: true,
-                })
-              }
-            >
-              😴 Chef's Night Off
-            </Button>
+            {addModal?.slot.endsWith('_main') && (
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() =>
+                  addMeal.mutate({ date: addModal!.date, slot: addModal!.slot, chef_night_off: true })
+                }
+              >
+                😴 Chef's Night Off
+              </Button>
+            )}
             {filteredRecipes.length === 0 ? (
               <div className="text-center py-8">
                 <p className="text-4xl mb-2">📖</p>
@@ -231,11 +240,7 @@ export default function PlanPage() {
                     key={recipe.id}
                     className="w-full text-left flex items-center gap-3 p-3 rounded-xl border hover:bg-accent transition-colors"
                     onClick={() =>
-                      addMeal.mutate({
-                        date: addModal!.date,
-                        meal_type: addModal!.meal_type,
-                        recipe_id: recipe.id,
-                      })
+                      addMeal.mutate({ date: addModal!.date, slot: addModal!.slot, recipe_id: recipe.id })
                     }
                   >
                     <span className="text-2xl">{recipe.emoji}</span>
@@ -266,36 +271,58 @@ export default function PlanPage() {
   );
 }
 
-function MealSlot({
+function MealSection({
   label,
+  emoji,
+  mainPlan,
+  sidePlan,
+  onAddMain,
+  onAddSide,
+  onRemove,
+}: {
+  label: string;
+  emoji: string;
+  mainPlan: MealPlanWithRecipe | undefined;
+  sidePlan: MealPlanWithRecipe | undefined;
+  onAddMain: () => void;
+  onAddSide: () => void;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+        {emoji} {label}
+      </p>
+      <DishSlot roleLabel="Main" plan={mainPlan} onAdd={onAddMain} onRemove={onRemove} />
+      <DishSlot roleLabel="Side" plan={sidePlan} onAdd={onAddSide} onRemove={onRemove} />
+    </div>
+  );
+}
+
+function DishSlot({
+  roleLabel,
   plan,
   onAdd,
   onRemove,
 }: {
-  label: string;
+  roleLabel: string;
   plan: MealPlanWithRecipe | undefined;
   onAdd: () => void;
   onRemove: (id: string) => void;
 }) {
   const recipe = plan?.recipes;
-  const emoji = label === 'Lunch' ? '☀️' : '🌙';
-
   return (
     <div className="flex items-center gap-2">
-      <span className="text-xs text-muted-foreground w-12 flex-shrink-0">
-        {emoji} {label}
-      </span>
+      <span className="text-xs text-muted-foreground w-8 flex-shrink-0">{roleLabel}</span>
       {plan ? (
-        <div className="flex-1 flex items-center justify-between bg-background rounded-lg px-2.5 py-1.5 border">
+        <div className="flex-1 flex items-center justify-between bg-background rounded-lg px-2.5 py-1.5 border min-w-0">
           <span className="text-sm font-medium truncate">
             {plan.chef_night_off ? (
               <span className="text-muted-foreground">Chef's Night Off 😴</span>
             ) : plan.is_leftover ? (
               <span>↩️ Leftovers {recipe ? `(${recipe.emoji} ${recipe.name})` : ''}</span>
             ) : recipe ? (
-              <span>
-                {recipe.emoji} {recipe.name}
-              </span>
+              <span>{recipe.emoji} {recipe.name}</span>
             ) : (
               <span className="text-muted-foreground">No recipe linked</span>
             )}
@@ -313,10 +340,9 @@ function MealSlot({
           className="flex-1 flex items-center gap-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg px-2.5 py-1.5 border border-dashed transition-colors text-sm"
         >
           <Plus className="h-3.5 w-3.5" />
-          <span>Add meal</span>
+          <span>Add {roleLabel.toLowerCase()}</span>
         </button>
       )}
     </div>
   );
 }
-

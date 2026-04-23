@@ -26,7 +26,7 @@ export default function DashboardPage() {
   const weekStart = format(startOfWeek(new Date(), { weekStartsOn: 1 }), 'yyyy-MM-dd');
   const weekEnd = format(addDays(startOfWeek(new Date(), { weekStartsOn: 1 }), 6), 'yyyy-MM-dd');
 
-  const { data: tonightPlan, isLoading: loadingTonight } = useQuery({
+  const { data: tonightPlans, isLoading: loadingTonight } = useQuery({
     queryKey: ['meal_plan', familyId, today, 'dinner'],
     enabled: !!familyId,
     queryFn: async () => {
@@ -35,9 +35,8 @@ export default function DashboardPage() {
         .select('*, recipes(*)')
         .eq('family_id', familyId!)
         .eq('date', today)
-        .eq('meal_type', 'dinner')
-        .maybeSingle();
-      return data;
+        .in('meal_type', ['dinner_main', 'dinner_side']);
+      return data ?? [];
     },
   });
 
@@ -90,7 +89,11 @@ export default function DashboardPage() {
 
   if (isLoading) return <DashboardSkeleton />;
 
-  const recipe = (tonightPlan as { recipes?: { name?: string; emoji?: string; active_time_min?: number; protein_g?: number } | null } | null)?.recipes;
+  type PlanWithRecipe = { meal_type: string; chef_night_off?: boolean; recipes?: { name?: string; emoji?: string; active_time_min?: number; protein_g?: number } | null };
+  const tonightMain = (tonightPlans ?? []).find((p) => (p as PlanWithRecipe).meal_type === 'dinner_main') as PlanWithRecipe | undefined;
+  const tonightSide = (tonightPlans ?? []).find((p) => (p as PlanWithRecipe).meal_type === 'dinner_side') as PlanWithRecipe | undefined;
+  const recipe = tonightMain?.recipes;
+  const sideRecipe = tonightSide?.recipes;
   const totalShoppingItems = Object.values(shoppingStats ?? {}).reduce((a, b) => a + b, 0);
   const topStore = Object.entries(shoppingStats ?? {}).sort((a, b) => b[1] - a[1])[0];
 
@@ -120,17 +123,29 @@ export default function DashboardPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {tonightPlan && recipe ? (
+          {tonightMain && recipe ? (
             <div className="space-y-3">
-              <div className="flex items-start gap-3">
-                <span className="text-4xl">{recipe.emoji ?? '🍽️'}</span>
-                <div className="flex-1">
-                  <p className="font-bold text-lg leading-tight">{recipe.name}</p>
-                  <p className="text-sm text-muted-foreground">
-                    ⏱ {recipe.active_time_min} min active
-                    {recipe.protein_g ? ` · ${recipe.protein_g}g protein` : ''}
-                  </p>
+              <div className="space-y-1.5">
+                <div className="flex items-start gap-3">
+                  <span className="text-4xl">{recipe.emoji ?? '🍽️'}</span>
+                  <div className="flex-1">
+                    <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Main Dish</p>
+                    <p className="font-bold text-lg leading-tight">{recipe.name}</p>
+                    <p className="text-sm text-muted-foreground">
+                      ⏱ {recipe.active_time_min} min active
+                      {recipe.protein_g ? ` · ${recipe.protein_g}g protein` : ''}
+                    </p>
+                  </div>
                 </div>
+                {sideRecipe && (
+                  <div className="flex items-center gap-3 pl-1">
+                    <span className="text-2xl">{sideRecipe.emoji ?? '🥗'}</span>
+                    <div>
+                      <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Side Dish</p>
+                      <p className="font-medium text-sm">{sideRecipe.name}</p>
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" className="flex-1" asChild>
@@ -141,7 +156,7 @@ export default function DashboardPage() {
                 </Button>
               </div>
             </div>
-          ) : tonightPlan?.chef_night_off ? (
+          ) : tonightMain?.chef_night_off ? (
             <div className="text-center py-2">
               <p className="text-3xl">😴</p>
               <p className="font-semibold mt-1">Chef's Night Off</p>
@@ -180,8 +195,8 @@ export default function DashboardPage() {
             {weekDays.map((day) => {
               const dayStr = format(day, 'yyyy-MM-dd');
               const dayPlans = (weekPlan ?? []).filter((p) => p.date === dayStr);
-              const lunch = dayPlans.find((p) => p.meal_type === 'lunch');
-              const dinner = dayPlans.find((p) => p.meal_type === 'dinner');
+              const lunch = dayPlans.find((p) => p.meal_type === 'lunch_main');
+              const dinner = dayPlans.find((p) => p.meal_type === 'dinner_main');
               const lunchRecipe = (lunch as { recipes?: { emoji?: string } } | undefined)?.recipes;
               const dinnerRecipe = (dinner as { recipes?: { emoji?: string } } | undefined)?.recipes;
 

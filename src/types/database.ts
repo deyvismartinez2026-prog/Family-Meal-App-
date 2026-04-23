@@ -1,7 +1,7 @@
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 
 export type MemberRole = 'adult' | 'kid';
-export type MealType = 'lunch' | 'dinner';
+export type MealType = 'lunch_main' | 'lunch_side' | 'dinner_main' | 'dinner_side';
 export type StoreType = 'target' | 'walmart' | 'bjs' | 'amazon' | 'any';
 export type TripType = 'weekly' | 'bulk' | 'subscribe' | 'any';
 export type ShoppingStatus = 'needed' | 'bought' | 'skipped';

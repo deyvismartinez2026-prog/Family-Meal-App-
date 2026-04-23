@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { ArrowLeft, Plus, X, Moon, Sun, LogOut, Copy } from 'lucide-react';
+import { ArrowLeft, Plus, X, Moon, Sun, LogOut, Copy, Pencil } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,6 +13,15 @@ import { useFamilyStore } from '@/store/familyStore';
 import { toast } from '@/hooks/use-toast';
 import type { FamilyMember } from '@/types/database';
 
+type MemberDraft = {
+  name: string; role: 'adult' | 'kid'; portion_multiplier: number;
+  emoji: string; protein_target_g: number | null;
+};
+
+const EMPTY_MEMBER: MemberDraft = {
+  name: '', role: 'adult', portion_multiplier: 1.0, emoji: '👤', protein_target_g: null,
+};
+
 export default function SettingsPage() {
   const familyId = useFamilyStore((s) => s.familyId);
   const familyCode = useFamilyStore((s) => s.familyCode);
@@ -21,11 +30,9 @@ export default function SettingsPage() {
   const logout = useFamilyStore((s) => s.logout);
   const queryClient = useQueryClient();
 
-  const [addMemberOpen, setAddMemberOpen] = useState(false);
-  const [newMember, setNewMember] = useState({
-    name: '', role: 'adult' as 'adult' | 'kid', portion_multiplier: 1.0, emoji: '👤',
-    protein_target_g: null as number | null,
-  });
+  const [memberDialogOpen, setMemberDialogOpen] = useState(false);
+  const [editMember, setEditMember] = useState<FamilyMember | null>(null);
+  const [memberDraft, setMemberDraft] = useState<MemberDraft>(EMPTY_MEMBER);
   const [exclusionInput, setExclusionInput] = useState('');
 
   const { data: members = [] } = useQuery({
@@ -46,16 +53,24 @@ export default function SettingsPage() {
     },
   });
 
-  const addMember = useMutation({
+  const saveMember = useMutation({
     mutationFn: async () => {
-      const { error } = await supabase.from('family_members').insert({ family_id: familyId!, ...newMember });
-      if (error) throw error;
+      if (editMember) {
+        const { error } = await supabase.from('family_members').update({
+          name: memberDraft.name, role: memberDraft.role,
+          portion_multiplier: memberDraft.portion_multiplier,
+          emoji: memberDraft.emoji, protein_target_g: memberDraft.protein_target_g,
+        }).eq('id', editMember.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('family_members').insert({ family_id: familyId!, ...memberDraft });
+        if (error) throw error;
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['family_members', familyId] });
-      setAddMemberOpen(false);
-      setNewMember({ name: '', role: 'adult', portion_multiplier: 1.0, emoji: '👤', protein_target_g: null });
-      toast({ title: 'Member added!' });
+      closeDialog();
+      toast({ title: editMember ? 'Member updated! ✓' : 'Member added!' });
     },
   });
 
@@ -64,7 +79,10 @@ export default function SettingsPage() {
       const { error } = await supabase.from('family_members').delete().eq('id', id);
       if (error) throw error;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['family_members', familyId] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['family_members', familyId] });
+      closeDialog();
+    },
   });
 
   const addExclusion = useMutation({
@@ -85,6 +103,14 @@ export default function SettingsPage() {
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['exclusions', familyId] }),
   });
+
+  function openAdd() { setEditMember(null); setMemberDraft(EMPTY_MEMBER); setMemberDialogOpen(true); }
+  function openEdit(m: FamilyMember) {
+    setEditMember(m);
+    setMemberDraft({ name: m.name, role: m.role, portion_multiplier: m.portion_multiplier, emoji: m.emoji, protein_target_g: m.protein_target_g });
+    setMemberDialogOpen(true);
+  }
+  function closeDialog() { setMemberDialogOpen(false); setEditMember(null); setMemberDraft(EMPTY_MEMBER); }
 
   return (
     <div className="p-4 space-y-4 animate-fade-in">
@@ -123,7 +149,7 @@ export default function SettingsPage() {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">Family Members</CardTitle>
-            <Button size="sm" variant="ghost" onClick={() => setAddMemberOpen(true)}>
+            <Button size="sm" variant="ghost" onClick={openAdd}>
               <Plus className="h-4 w-4 mr-1" /> Add
             </Button>
           </div>
@@ -136,14 +162,14 @@ export default function SettingsPage() {
                 <p className="font-medium">{m.name}</p>
                 <p className="text-xs text-muted-foreground capitalize">
                   {m.role} · {m.portion_multiplier}× portion
-                  {m.protein_target_g ? ` · ${m.protein_target_g}g protein target` : ''}
+                  {m.protein_target_g ? ` · ${m.protein_target_g}g protein` : ''}
                 </p>
               </div>
               <button
-                onClick={() => deleteMember.mutate(m.id)}
-                className="text-muted-foreground hover:text-destructive"
+                onClick={() => openEdit(m)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors"
               >
-                <X className="h-4 w-4" />
+                <Pencil className="h-4 w-4" />
               </button>
             </div>
           ))}
@@ -170,19 +196,13 @@ export default function SettingsPage() {
                 }
               }}
             />
-            <Button
-              variant="outline"
-              onClick={() => exclusionInput.trim() && addExclusion.mutate(exclusionInput.trim())}
-            >
+            <Button variant="outline" onClick={() => exclusionInput.trim() && addExclusion.mutate(exclusionInput.trim())}>
               Add
             </Button>
           </div>
           <div className="flex flex-wrap gap-2">
             {exclusions.map((ex) => (
-              <div
-                key={ex.id}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-destructive/10 text-destructive text-sm"
-              >
+              <div key={ex.id} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-destructive/10 text-destructive text-sm">
                 <span>{ex.ingredient_name}</span>
                 <button onClick={() => deleteExclusion.mutate(ex.id)}>
                   <X className="h-3 w-3" />
@@ -226,19 +246,19 @@ export default function SettingsPage() {
         Sign Out (This Device)
       </Button>
 
-      {/* Add Member Dialog */}
-      <Dialog open={addMemberOpen} onOpenChange={setAddMemberOpen}>
+      {/* Add / Edit Member Dialog */}
+      <Dialog open={memberDialogOpen} onOpenChange={(o) => !o && closeDialog()}>
         <DialogContent className="mx-4">
           <DialogHeader>
-            <DialogTitle>Add Family Member</DialogTitle>
+            <DialogTitle>{editMember ? 'Edit Family Member' : 'Add Family Member'}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <div className="flex gap-2">
               <div className="w-16">
                 <Label className="text-xs">Emoji</Label>
                 <Input
-                  value={newMember.emoji}
-                  onChange={(e) => setNewMember((p) => ({ ...p, emoji: e.target.value }))}
+                  value={memberDraft.emoji}
+                  onChange={(e) => setMemberDraft((p) => ({ ...p, emoji: e.target.value }))}
                   className="text-center text-xl"
                   maxLength={2}
                 />
@@ -247,8 +267,8 @@ export default function SettingsPage() {
                 <Label className="text-xs">Name</Label>
                 <Input
                   placeholder="Name"
-                  value={newMember.name}
-                  onChange={(e) => setNewMember((p) => ({ ...p, name: e.target.value }))}
+                  value={memberDraft.name}
+                  onChange={(e) => setMemberDraft((p) => ({ ...p, name: e.target.value }))}
                 />
               </div>
             </div>
@@ -258,8 +278,8 @@ export default function SettingsPage() {
                 {(['adult', 'kid'] as const).map((r) => (
                   <button
                     key={r}
-                    onClick={() => setNewMember((p) => ({ ...p, role: r }))}
-                    className={`flex-1 py-2 rounded-lg border text-sm capitalize transition-colors ${newMember.role === r ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted'}`}
+                    onClick={() => setMemberDraft((p) => ({ ...p, role: r }))}
+                    className={`flex-1 py-2 rounded-lg border text-sm capitalize transition-colors ${memberDraft.role === r ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted'}`}
                   >
                     {r === 'adult' ? '👨 Adult' : '🧒 Kid'}
                   </button>
@@ -273,27 +293,37 @@ export default function SettingsPage() {
                 step="0.1"
                 min="0.1"
                 max="3"
-                value={newMember.portion_multiplier}
-                onChange={(e) => setNewMember((p) => ({ ...p, portion_multiplier: parseFloat(e.target.value) || 1 }))}
+                value={memberDraft.portion_multiplier}
+                onChange={(e) => setMemberDraft((p) => ({ ...p, portion_multiplier: parseFloat(e.target.value) || 1 }))}
               />
               <p className="text-xs text-muted-foreground mt-1">Adults: 1.0–1.5 · Kids: 0.5</p>
             </div>
-            {newMember.role === 'adult' && (
+            {memberDraft.role === 'adult' && (
               <div>
                 <Label className="text-xs">Daily protein target (g, optional)</Label>
                 <Input
                   type="number"
                   placeholder="e.g. 160"
-                  value={newMember.protein_target_g ?? ''}
-                  onChange={(e) => setNewMember((p) => ({ ...p, protein_target_g: e.target.value ? parseInt(e.target.value) : null }))}
+                  value={memberDraft.protein_target_g ?? ''}
+                  onChange={(e) => setMemberDraft((p) => ({ ...p, protein_target_g: e.target.value ? parseInt(e.target.value) : null }))}
                 />
               </div>
             )}
           </div>
           <DialogFooter className="flex-row gap-2">
-            <Button variant="outline" className="flex-1" onClick={() => setAddMemberOpen(false)}>Cancel</Button>
-            <Button className="flex-1" disabled={!newMember.name.trim() || addMember.isPending} onClick={() => addMember.mutate()}>
-              Add Member
+            {editMember && (
+              <Button
+                variant="outline"
+                className="text-destructive hover:bg-destructive/10 border-destructive/30"
+                onClick={() => { if (confirm('Remove this member?')) deleteMember.mutate(editMember.id); }}
+                disabled={deleteMember.isPending}
+              >
+                Remove
+              </Button>
+            )}
+            <Button variant="outline" className="flex-1" onClick={closeDialog}>Cancel</Button>
+            <Button className="flex-1" disabled={!memberDraft.name.trim() || saveMember.isPending} onClick={() => saveMember.mutate()}>
+              {editMember ? 'Save Changes' : 'Add Member'}
             </Button>
           </DialogFooter>
         </DialogContent>
